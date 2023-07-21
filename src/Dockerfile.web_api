@@ -1,0 +1,17 @@
+FROM --platform=linux/arm64 public.ecr.aws/amazonlinux/amazonlinux:2022
+
+WORKDIR /src
+
+RUN yum -y install pango
+
+RUN yum -y install gcc git python3-pip python3-devel jq which
+RUN pip install -U pipenv uvicorn[standard] ddtrace
+RUN ln -s /usr/bin/python3 /usr/bin/python
+COPY ./Pipfile /src/Pipfile
+COPY ./Pipfile.lock /src/Pipfile.lock
+RUN mkdir .venv
+RUN pipenv sync --system
+
+COPY . /src/
+
+EXPOSE 80

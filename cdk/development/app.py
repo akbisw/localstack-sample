@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 from typing import Optional, List, Dict
-from aws_cdk import Duration, Stack, aws_ec2, aws_ecs, aws_route53, aws_logs, aws_iam, App, aws_ecr_assets
+from aws_cdk import Duration, Stack, aws_ec2, aws_ecs, aws_route53, aws_logs, aws_iam, App, aws_ecr_assets, aws_ecs_patterns, aws_elasticloadbalancingv2
 from constructs import Construct
 import os
 
@@ -183,74 +183,7 @@ class FargateServiceBuilder(object):
                 "com.datadoghq.ad.init_configs": "[{}]",
                 "org.opencontainers.image.revision": "1.0.0",
             },
-            logging=aws_ecs.LogDrivers.firelens(
-                options={
-                    "Name": datadog_agent_vars.name,
-                    "Host": datadog_agent_vars.host,
-                    "TLS": "on",
-                    "dd_service": datadog_agent_vars.service_name,
-                    "dd_source": "ecs",
-                    "provider": "ecs",
-                    "dd_tags": f"env:{datadog_agent_vars.environment}",
-                },
-            ),
         )
-
-        # fluentbit router
-        self.service_task_definition.add_firelens_log_router(
-            id="log-router",
-            container_name="log_router",
-            memory_reservation_mib=256,
-            cpu=256,
-            essential=False,
-            image=aws_ecs.ContainerImage.from_registry(
-                name="amazon/aws-for-fluent-bit:stable"
-            ),
-            firelens_config=aws_ecs.FirelensConfig(
-                type=aws_ecs.FirelensLogRouterType.FLUENTBIT,
-                options=aws_ecs.FirelensOptions(
-                    config_file_type=aws_ecs.FirelensConfigFileType.FILE,
-                    config_file_value="/fluent-bit/configs/parse-json.conf",
-                    enable_ecs_log_metadata=True,
-                ),
-            ),
-            logging=aws_ecs.LogDrivers.aws_logs(
-                stream_prefix=f"{self.service_name}-firelens",
-                log_retention=aws_logs.RetentionDays.ONE_WEEK,
-                mode=aws_ecs.AwsLogDriverMode.NON_BLOCKING,
-            ),
-        )
-
-        # add datadog agent
-        self.service_task_definition.add_container(
-            id="datadog-agent",
-            container_name="datadog-agent",
-            image=aws_ecs.ContainerImage.from_registry(name="datadog/agent:7.43.1"),
-            essential=False,
-            environment=datadog_agent_vars.get_vars(),
-            port_mappings=[
-                aws_ecs.PortMapping(
-                    container_port=8126,
-                    host_port=8126,
-                    protocol=aws_ecs.Protocol.TCP,
-                ),
-            ],
-            memory_reservation_mib=512,
-            cpu=512,
-            health_check=aws_ecs.HealthCheck(
-                retries=2,
-                command=["CMD-SHELL", "agent health"],
-                timeout=Duration.seconds(5),
-                interval=Duration.seconds(30),
-                start_period=Duration.seconds(15),
-            ),
-            logging=aws_ecs.LogDrivers.aws_logs(
-                stream_prefix=f"{self.service_name}-datadog",
-                log_retention=aws_logs.RetentionDays.ONE_WEEK,
-                mode=aws_ecs.AwsLogDriverMode.NON_BLOCKING,
-            ),
-        )
-
 
     def build(
         self,
@@ -262,16 +195,30 @@ class FargateServiceBuilder(object):
                 value=self.environment_variables[var],
             )
 
-        fargate_service = aws_ecs.FargateService(
+        load_balanced_fargate_service = aws_ecs_patterns.ApplicationLoadBalancedFargateService(
             scope=self.base_stack,
             id=f"{self.service_name}-service",
+            assign_public_ip=False,
             service_name=self.service_name,
             cluster=self.fargate_cluster,
-            task_definition=self.service_task_definition,
+            cpu=self.cpu,
             desired_count=1,
-            assign_public_ip=True,
+            memory_limit_mib=self.memory,
+            public_load_balancer=False,
+            task_definition=self.service_task_definition,
+            protocol=aws_elasticloadbalancingv2.ApplicationProtocol.HTTP,
+            open_listener=True,
+            protocol_version=aws_elasticloadbalancingv2.ApplicationProtocolVersion.HTTP1,
+            target_protocol=aws_elasticloadbalancingv2.ApplicationProtocol.HTTP,
+            health_check_grace_period=Duration.seconds(20),
+            min_healthy_percent=self.min_healthy_percent,
+            max_healthy_percent=self.max_healthy_percent,
+            enable_execute_command=False,
+            circuit_breaker=self.circuit_breaker,
+            propagate_tags=aws_ecs.PropagatedTagSource.SERVICE,
+            enable_ecs_managed_tags=True,
         )
-        return fargate_service
+        return load_balanced_fargate_service.service
 
 
 class WebApiServiceStack(Stack):

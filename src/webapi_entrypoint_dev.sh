@@ -14,4 +14,4 @@ activate = 1
 activate = 1
 EOT
 
-python -m http.server 8080
+.venv/bin/gunicorn web_api.handler_fargate:app --workers 4 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:80 --reload

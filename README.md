@@ -17,5 +17,5 @@ pipenv run cdklocal bootstrap --app development/app.py
 
 3. Deploy cdk
 ```
-pipenv run cdklocal deploy "web-api" --app development/app.py --require-approval never
+pipenv run cdklocal deploy --all --app development/app.py --require-approval never
 ```

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 from typing import Optional, List, Dict
-from aws_cdk import Duration, Stack, aws_ec2, aws_ecs, aws_route53, aws_logs, aws_iam, App, aws_ecr_assets, aws_ecs_patterns, aws_elasticloadbalancingv2
+from aws_cdk import Duration, Stack, Tags, aws_ec2, aws_ecs, aws_route53, aws_logs, aws_iam, App, aws_ecr_assets, aws_ecs_patterns, aws_elasticloadbalancingv2, aws_secretsmanager, aws_rds, aws_s3, aws_sqs, aws_certificatemanager, aws_cognito, aws_apigatewayv2, aws_apigatewayv2_integrations, aws_apigatewayv2_authorizers
 from constructs import Construct
 import os
 
@@ -218,7 +218,7 @@ class FargateServiceBuilder(object):
             propagate_tags=aws_ecs.PropagatedTagSource.SERVICE,
             enable_ecs_managed_tags=True,
         )
-        return load_balanced_fargate_service.service
+        return load_balanced_fargate_service
 
 
 class WebApiServiceStack(Stack):
@@ -302,12 +302,296 @@ class WebApiServiceStack(Stack):
         # finally build the service
         self.web_api_fargate_service = web_api_service.build()
 
+
+class AuthStack(Stack):
+    def __init__(
+        self,
+        scope: Construct,
+        construct_id: str,
+        **kwargs,
+    ) -> None:
+        super().__init__(scope, construct_id, **kwargs)
+
+
+        self.user_pool = aws_cognito.UserPool(
+            self,
+            id="meow-userpool",
+            advanced_security_mode=aws_cognito.AdvancedSecurityMode.ENFORCED,
+            user_pool_name="meow-userpool",
+            self_sign_up_enabled=True,
+            user_invitation=aws_cognito.UserInvitationConfig(
+                email_subject="Welcome to meow!",
+                email_body="Hey {username}, you've been invited to join meow! "
+                "Your temporary password is {####}",
+                sms_message="Welcome to meow, {username}! Your temporary password for meow is {####}",
+            ),
+            sign_in_aliases=aws_cognito.SignInAliases(email=True, username=False),
+            password_policy=aws_cognito.PasswordPolicy(
+                min_length=10,
+                require_lowercase=False,
+                require_uppercase=False,
+                require_digits=False,
+                require_symbols=False,
+            ),
+            mfa=aws_cognito.Mfa.OPTIONAL,
+            mfa_second_factor=aws_cognito.MfaSecondFactor(sms=True, otp=True),
+            account_recovery=aws_cognito.AccountRecovery.EMAIL_ONLY,
+            # Note: These custom attributes can't be removed once added
+            custom_attributes={
+                "referral_code": aws_cognito.StringAttribute(mutable=True),
+                "affiliate_id": aws_cognito.StringAttribute(mutable=True),
+            },
+            device_tracking=aws_cognito.DeviceTracking(
+                challenge_required_on_new_device=True,
+                device_only_remembered_on_user_prompt=True,
+            ),
+        )
+
+
+
+        resource_server_scope = aws_cognito.ResourceServerScope(
+            scope_description="oauth scope for cognito access token",
+            scope_name="api",
+        )
+        resource_server = self.user_pool.add_resource_server(
+            id="resource-server",
+            identifier="meow.com",
+            user_pool_resource_server_name="meow.com",
+            scopes=[resource_server_scope],
+        )
+
+        self.user_pool_client = self.user_pool.add_client(
+            id="meow-app-client",
+            user_pool_client_name="meow-app-client",
+            # setting user_password to False disallows username/password authentication
+            auth_flows=aws_cognito.AuthFlow(user_password=False, user_srp=True),
+            # return generic error when user not found
+            prevent_user_existence_errors=True,
+            # OAuth 2.0 token settings
+            access_token_validity=Duration.minutes(30),
+            id_token_validity=Duration.minutes(30),
+            refresh_token_validity=Duration.hours(12),
+            o_auth=aws_cognito.OAuthSettings(
+                callback_urls=[
+                    url + "/signin-redirect"
+                    for url in [
+                        "https://app.meow.com",
+                        "http://localhost:3000",
+                    ]
+                    if url
+                ],
+                logout_urls=[
+                    url
+                    for url in [
+                        "https://app.meow.com",
+                        "http://localhost:3000",
+                    ]
+                    if url
+                ],
+                scopes=[
+                    aws_cognito.OAuthScope.resource_server(
+                        server=resource_server, scope=resource_server_scope
+                    ),
+                    aws_cognito.OAuthScope.PHONE,
+                    aws_cognito.OAuthScope.EMAIL,
+                    aws_cognito.OAuthScope.OPENID,
+                    aws_cognito.OAuthScope.PROFILE,
+                    aws_cognito.OAuthScope.COGNITO_ADMIN,
+                ],
+            ),
+            supported_identity_providers=[
+                aws_cognito.UserPoolClientIdentityProvider.COGNITO,
+                aws_cognito.UserPoolClientIdentityProvider.GOOGLE,
+            ],
+        )
+
+
+class LocalHttpApiStack(Stack):
+    def __init__(
+        self,
+        scope: Construct,
+        construct_id: str,
+        user_pool: aws_cognito.IUserPool,
+        user_pool_client: aws_cognito.IUserPoolClient,
+        web_api_lb_listener: aws_elasticloadbalancingv2.IApplicationListener,
+        web_api_service_domain: str,
+        **kwargs,
+    ) -> None:
+        super().__init__(scope, construct_id, **kwargs)
+
+        self.api_gateway = aws_apigatewayv2.HttpApi(
+            self,
+            id="local-api-gateway",
+            api_name="local-api-gateway",
+            description="Local HTTP API Gateway",
+            cors_preflight=aws_apigatewayv2.CorsPreflightOptions(
+                allow_credentials=True,
+                allow_origins=[
+                    "https://app.meow.com",
+                    "http://localhost:3000",
+                ],
+                allow_methods=[
+                    aws_apigatewayv2.CorsHttpMethod.GET,
+                    aws_apigatewayv2.CorsHttpMethod.POST,
+                    aws_apigatewayv2.CorsHttpMethod.PATCH,
+                    aws_apigatewayv2.CorsHttpMethod.PUT,
+                    aws_apigatewayv2.CorsHttpMethod.DELETE,
+                    aws_apigatewayv2.CorsHttpMethod.OPTIONS,
+                ],
+                allow_headers=[
+                    "authorization",
+                    "content-type",
+                    "x-datadog-trace-id",
+                    "x-datadog-parent-id",
+                    "x-datadog-origin",
+                    "x-datadog-sampling-priority",
+                    "x-datadog-sampled",
+                    "origin",
+                    "access-control-request-method",
+                    "meow-entity-id",
+                    "meow-device-id",
+                    "meow-bank-account-id",
+                ],
+            ),
+            create_default_stage=True,
+            disable_execute_api_endpoint=False,
+        )
+        Tags.of(self.api_gateway).add("_custom_id_", "webapi")
+
+        """ web-api integration """
+        self.web_api_integration = aws_apigatewayv2_integrations.HttpAlbIntegration(
+            id="local-http-integration",
+            listener=web_api_lb_listener,
+            method=aws_apigatewayv2.HttpMethod.ANY,
+            secure_server_name=web_api_service_domain,
+            parameter_mapping=aws_apigatewayv2.ParameterMapping()
+                .append_header(
+                    name="x-request-id",
+                    value=aws_apigatewayv2.MappingValue.context_variable(variable_name="requestId"),
+                )
+                .append_header(
+                    name="x-request-protocol",
+                    value=aws_apigatewayv2.MappingValue.context_variable(variable_name="protocol"),
+                )
+                .append_header(
+                    name="x-authorizer-sub",
+                    value=aws_apigatewayv2.MappingValue.context_variable(
+                        variable_name="authorizer.sub"
+                    ),
+                )
+                .append_header(
+                    name="x-cognito-sub",
+                    value=aws_apigatewayv2.MappingValue.context_variable(
+                        variable_name="authorizer.claims.sub"
+                    ),
+                )
+                .append_header(
+                    name="x-cognito-client-id",
+                    value=aws_apigatewayv2.MappingValue.context_variable(
+                        variable_name="authorizer.claims.client_id"
+                    ),
+                )
+                .append_header(
+                    name="x-cognito-issuer",
+                    value=aws_apigatewayv2.MappingValue.context_variable(
+                        variable_name="authorizer.claims.iss"
+                    ),
+                )
+                .append_header(
+                    # HTTP API is including the source IP in the "forwarded" header.
+                    # AWS WAF is not able to understand this header's format,
+                    # so we include the source IP in a custom header.
+                    name="x-meow-forwarded-for",
+                    value=aws_apigatewayv2.MappingValue.context_variable(
+                        variable_name="identity.sourceIp"
+                    ),
+                )
+                .append_header(
+                    name="x-user-agent",
+                    value=aws_apigatewayv2.MappingValue.context_variable(
+                        variable_name="identity.userAgent"
+                    ),
+                ),
+        )
+
+
+        """ Cognito Authorizer """
+        cognito_authorizer = aws_apigatewayv2_authorizers.HttpJwtAuthorizer(
+            id="local-cognito-authorizer-v2",
+            authorizer_name="local-cognito-authorizer-v2",
+            jwt_audience=[user_pool_client.user_pool_client_id],
+            jwt_issuer=f"http://localhost.localstack.cloud:4566/{user_pool.user_pool_id}",
+        )
+        """ Add routes """
+        # unauthenticated route for OPTIONS
+        self.api_gateway.add_routes(
+            path="/{proxy+}",
+            authorization_scopes=None,
+            authorizer=None,
+            methods=[aws_apigatewayv2.HttpMethod.OPTIONS],
+            integration=self.web_api_integration,
+        )
+        # catch all routes for API gateway. require all requests to be authenticated
+        self.api_gateway.add_routes(
+            path="/{proxy+}",
+            authorization_scopes=["aws.cognito.signin.user.admin"],
+            authorizer=cognito_authorizer,
+            methods=[
+                aws_apigatewayv2.HttpMethod.GET,
+                aws_apigatewayv2.HttpMethod.POST,
+                aws_apigatewayv2.HttpMethod.PUT,
+                aws_apigatewayv2.HttpMethod.DELETE,
+                aws_apigatewayv2.HttpMethod.PATCH,
+            ],
+            integration=self.web_api_integration,
+        )
+        unauthenticated_routes = [
+            ("/account/invitations/accept", [aws_apigatewayv2.HttpMethod.PUT]),
+            ("/onboarding/business/signer/{token}", [aws_apigatewayv2.HttpMethod.GET, aws_apigatewayv2.HttpMethod.POST]),
+            (
+                "/onboarding/business/upload-documents/{token}",
+                [aws_apigatewayv2.HttpMethod.POST, aws_apigatewayv2.HttpMethod.GET],
+            ),
+            (
+                "/onboarding/business/upload-documents/{token}/{kyb_info_id}",
+                [aws_apigatewayv2.HttpMethod.DELETE],
+            ),
+        ]
+        # allow accessing /docs on dev environments. Dev api is behind a VPN
+        unauthenticated_routes.append(("/health", [aws_apigatewayv2.HttpMethod.GET]))
+        unauthenticated_routes.append(("/docs", [aws_apigatewayv2.HttpMethod.GET]))
+        unauthenticated_routes.append(("/openapi.json", [aws_apigatewayv2.HttpMethod.GET]))
+        for unauthenticated_route in unauthenticated_routes:
+            self.api_gateway.add_routes(
+                path=unauthenticated_route[0],
+                methods=unauthenticated_route[1],
+                authorization_scopes=None,
+                authorizer=None,
+                integration=self.web_api_integration,
+            )
+
+
 app = App()
 
-WebApiServiceStack(
+cognito_stack = AuthStack(
+    scope=app,
+    construct_id="cognito",
+    env=local_env,
+)
+
+web_api_service_stack = WebApiServiceStack(
     scope=app,
     construct_id="web-api",
     service_name="web-api",
+    env=local_env,
+)
+LocalHttpApiStack(
+    scope=app,
+    construct_id="local-http-api",
+    user_pool=cognito_stack.user_pool,
+    user_pool_client=cognito_stack.user_pool_client,
+    web_api_lb_listener=web_api_service_stack.web_api_fargate_service.listener,
+    web_api_service_domain="web-api-service",
     env=local_env,
 )
 

@@ -4,10 +4,10 @@ verify_ssl = true
 name = "pypi"
 
 [packages]
-ddtrace = "==2.3.2" # Do not upgrade this until memory leak issue is resolved in later versions.
 fastapi = "==0.103.1"
 # FastAPI requirement for form data.
 python-multipart = "==0.0.6"
+uvicorn = {version = "==0.30.1", extras = ["standard"]}
 
 [requires]
 python_version = "3.11"

@@ -14,4 +14,4 @@ activate = 1
 activate = 1
 EOT
 
-.venv/bin/gunicorn web_api.handler_fargate:app --workers 4 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:80 --reload
+uvicorn web_api.handler_fargate:app --host 0.0.0.0 --port 80 --reload

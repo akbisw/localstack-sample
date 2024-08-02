@@ -1,0 +1,20 @@
+FROM --platform=linux/arm64 public.ecr.aws/amazonlinux/amazonlinux:2023.2.20231030.1
+
+WORKDIR /src
+
+# WeasyPrint requirement
+RUN yum -y install pango inotify-tools procps-ng
+
+# hdwallet (pysha3) requirement
+RUN yum -y install gcc git python3.11 python3.11-pip python3.11-devel jq which
+RUN ln -s /usr/bin/python3.11 /usr/bin/python
+RUN pip3.11 install -U pipenv
+COPY ./Pipfile /src/Pipfile
+COPY ./Pipfile.lock /src/Pipfile.lock
+RUN mkdir .venv
+
+RUN pipenv install --system --deploy
+
+COPY . /src/
+
+EXPOSE 80

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 from typing import Optional, List, Dict
-from aws_cdk import Duration, Stack, Tags, aws_ec2, aws_ecs, aws_route53, aws_logs, aws_iam, App, aws_ecr_assets, aws_ecs_patterns, aws_elasticloadbalancingv2, aws_secretsmanager, aws_rds, aws_s3, aws_sqs, aws_certificatemanager, aws_cognito, aws_apigatewayv2, aws_apigatewayv2_integrations, aws_apigatewayv2_authorizers
+from aws_cdk import Duration, Stack, Tags, aws_ec2, aws_ecs, aws_route53, aws_logs, aws_iam, App, aws_ecr_assets, aws_ecs_patterns, aws_elasticloadbalancingv2, aws_secretsmanager, aws_rds, aws_s3, aws_sqs, aws_certificatemanager, aws_cognito, aws_apigatewayv2, aws_apigatewayv2_integrations, aws_apigatewayv2_authorizers, aws_lambda
 from constructs import Construct
 import os
 
@@ -312,6 +312,46 @@ class AuthStack(Stack):
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
+        custom_message_lambda = aws_lambda.DockerImageFunction(
+            scope=self,
+            id="custom-message-cognito",
+            function_name="custom-message-cognito",
+            code=aws_lambda.DockerImageCode.from_image_asset(
+                directory=os.path.join(
+                    os.path.dirname(os.path.realpath(__file__)), "../../src"
+                ),
+                cmd=["custom_message_cognito.handler.handler"],
+                platform=aws_ecr_assets.Platform.LINUX_ARM64,
+            )
+        )
+
+        # Add the new user lambda
+        new_user_lambda = aws_lambda.DockerImageFunction(
+            scope=self,
+            id="new-user-lambda",
+            function_name="new-user-lambda",
+            code=aws_lambda.DockerImageCode.from_image_asset(
+                directory=os.path.join(
+                    os.path.dirname(os.path.realpath(__file__)), "../../src"
+                ),
+                cmd=["new_user_lambda.handler.handler"],
+                platform=aws_ecr_assets.Platform.LINUX_ARM64,
+            ),
+        )
+
+        # Add the pre-signup lambda
+        cognito_pre_signup_lambda = aws_lambda.DockerImageFunction(
+            scope=self,
+            id="cognito-pre-signup-lambda",
+            function_name="cognito-pre-signup-lambda",
+            code=aws_lambda.DockerImageCode.from_image_asset(
+                directory=os.path.join(
+                    os.path.dirname(os.path.realpath(__file__)), "../../src"
+                ),
+                cmd=["cognito_pre_signup_lambda.handler.handler"],
+                platform=aws_ecr_assets.Platform.LINUX_ARM64,
+            ),
+        )
 
         self.user_pool = aws_cognito.UserPool(
             self,
@@ -345,8 +385,20 @@ class AuthStack(Stack):
                 challenge_required_on_new_device=True,
                 device_only_remembered_on_user_prompt=True,
             ),
+            lambda_triggers=aws_cognito.UserPoolTriggers(
+                custom_message=custom_message_lambda,
+            ),
         )
 
+        # Add triggers to the user pool
+        self.user_pool.add_trigger(
+            aws_cognito.UserPoolOperation.POST_CONFIRMATION,
+            new_user_lambda,
+        )
+        self.user_pool.add_trigger(
+            aws_cognito.UserPoolOperation.PRE_SIGN_UP,
+            cognito_pre_signup_lambda,
+        )
 
 
         resource_server_scope = aws_cognito.ResourceServerScope(

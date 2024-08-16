@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 from typing import Optional, List, Dict
-from aws_cdk import Duration, Stack, Tags, aws_ec2, aws_ecs, aws_route53, aws_logs, aws_iam, App, aws_ecr_assets, aws_ecs_patterns, aws_elasticloadbalancingv2, aws_secretsmanager, aws_rds, aws_s3, aws_sqs, aws_certificatemanager, aws_cognito, aws_apigatewayv2, aws_apigatewayv2_integrations, aws_apigatewayv2_authorizers, aws_lambda
+from aws_cdk import Duration, Stack, Tags, aws_ec2, aws_ecs, aws_route53, aws_logs, aws_iam, App, aws_ecr_assets, aws_ecs_patterns, aws_elasticloadbalancingv2, aws_cognito, aws_apigatewayv2, aws_apigatewayv2_integrations, aws_apigatewayv2_authorizers, aws_lambda, aws_applicationautoscaling
 from constructs import Construct
 import os
 
@@ -59,6 +59,8 @@ class FargateServiceBuilder(object):
         enable_execute_command: Optional[bool] = None,
         min_healthy_percent: Optional[int] = None,
         max_healthy_percent: int = 200,
+        is_scheduled_task: bool = False,
+        schedule: Optional[aws_applicationautoscaling.Schedule] = None,
     ) -> None:
 
         datadog_env = "local"
@@ -89,6 +91,8 @@ class FargateServiceBuilder(object):
         self.min_healthy_percent = min_healthy_percent
         self.max_healthy_percent = max_healthy_percent
         self.task_name = f"{self.service_name}-service"
+        self.is_scheduled_task = is_scheduled_task
+        self.schedule = schedule
 
         self.service_family_name = f"{self.task_name}-family"
 
@@ -101,7 +105,7 @@ class FargateServiceBuilder(object):
             ),
             file=dockerfile_name,
         )
-        container_image = aws_ecs.ContainerImage.from_docker_image_asset(
+        self.container_image = aws_ecs.ContainerImage.from_docker_image_asset(
             asset=docker_image
         )
 
@@ -165,7 +169,7 @@ class FargateServiceBuilder(object):
         self.container_definition = self.service_task_definition.add_container(
             id=f"{self.service_name}-container",
             container_name=self.service_name,
-            image=container_image,
+            image=self.container_image,
             linux_parameters=aws_ecs.LinuxParameters(
                 scope=self.base_stack,
                 id=f"{self.service_name}-linux-params",
@@ -185,40 +189,45 @@ class FargateServiceBuilder(object):
             },
         )
 
-    def build(
-        self,
-    ):
-        # add all env variables to container
-        for var in self.environment_variables:
-            self.container_definition.add_environment(
-                name=var,
-                value=self.environment_variables[var],
+    def build(self):
+        if self.is_scheduled_task:
+            return aws_ecs_patterns.ScheduledFargateTask(
+                self.base_stack,
+                id=f"{self.service_name}-scheduled-task",
+                cluster=self.fargate_cluster,
+                scheduled_fargate_task_image_options=aws_ecs_patterns.ScheduledFargateTaskImageOptions(
+                    image=self.container_image,
+                    memory_limit_mib=self.memory,
+                    cpu=self.cpu,
+                    environment=self.environment_variables,
+                ),
+                schedule=self.schedule,
+                platform_version=aws_ecs.FargatePlatformVersion.LATEST,
             )
-
-        load_balanced_fargate_service = aws_ecs_patterns.ApplicationLoadBalancedFargateService(
-            scope=self.base_stack,
-            id=f"{self.service_name}-service",
-            assign_public_ip=False,
-            service_name=self.service_name,
-            cluster=self.fargate_cluster,
-            cpu=self.cpu,
-            desired_count=1,
-            memory_limit_mib=self.memory,
-            public_load_balancer=False,
-            task_definition=self.service_task_definition,
-            protocol=aws_elasticloadbalancingv2.ApplicationProtocol.HTTP,
-            open_listener=True,
-            protocol_version=aws_elasticloadbalancingv2.ApplicationProtocolVersion.HTTP1,
-            target_protocol=aws_elasticloadbalancingv2.ApplicationProtocol.HTTP,
-            health_check_grace_period=Duration.seconds(20),
-            min_healthy_percent=self.min_healthy_percent,
-            max_healthy_percent=self.max_healthy_percent,
-            enable_execute_command=False,
-            circuit_breaker=self.circuit_breaker,
-            propagate_tags=aws_ecs.PropagatedTagSource.SERVICE,
-            enable_ecs_managed_tags=True,
-        )
-        return load_balanced_fargate_service
+        else:
+            return aws_ecs_patterns.ApplicationLoadBalancedFargateService(
+                scope=self.base_stack,
+                id=f"{self.service_name}-service",
+                assign_public_ip=False,
+                service_name=self.service_name,
+                cluster=self.fargate_cluster,
+                cpu=self.cpu,
+                desired_count=1,
+                memory_limit_mib=self.memory,
+                public_load_balancer=False,
+                task_definition=self.service_task_definition,
+                protocol=aws_elasticloadbalancingv2.ApplicationProtocol.HTTP,
+                open_listener=True,
+                protocol_version=aws_elasticloadbalancingv2.ApplicationProtocolVersion.HTTP1,
+                target_protocol=aws_elasticloadbalancingv2.ApplicationProtocol.HTTP,
+                health_check_grace_period=Duration.seconds(20),
+                min_healthy_percent=self.min_healthy_percent,
+                max_healthy_percent=self.max_healthy_percent,
+                enable_execute_command=False,
+                circuit_breaker=self.circuit_breaker,
+                propagate_tags=aws_ecs.PropagatedTagSource.SERVICE,
+                enable_ecs_managed_tags=True,
+            )
 
 
 class WebApiServiceStack(Stack):
@@ -275,6 +284,22 @@ class WebApiServiceStack(Stack):
                 logging=aws_ecs.ExecuteCommandLogging.OVERRIDE,
             ),
         )
+
+        scheduled_task = FargateServiceBuilder(
+            base_stack=self,
+            service_name=service_name + "-scheduled-task",
+            vpc=vpc,
+            fargate_cluster=cluster,
+            image_directory="src",
+            dockerfile_name="Dockerfile",
+            command=["echo", "hello @Codebase"],
+            cpu=256,
+            port=None,
+            is_scheduled_task=True,
+            schedule=aws_applicationautoscaling.Schedule.rate(Duration.minutes(5)),
+        )
+
+        self.scheduled_task = scheduled_task.build()
 
         web_api_entrypoint = "./webapi_entrypoint_dev.sh"
         # ignore health check in dev
@@ -637,6 +662,7 @@ web_api_service_stack = WebApiServiceStack(
     service_name="web-api",
     env=local_env,
 )
+
 LocalHttpApiStack(
     scope=app,
     construct_id="local-http-api",

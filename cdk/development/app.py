@@ -191,18 +191,20 @@ class FargateServiceBuilder(object):
 
     def build(self):
         if self.is_scheduled_task:
-            return aws_ecs_patterns.ScheduledFargateTask(
-                self.base_stack,
-                id=f"{self.service_name}-scheduled-task",
+            return aws_ecs.FargateService(
+                scope=self.base_stack,
+                id=f"{self.service_name}-task",
+                service_name=self.service_name,
                 cluster=self.fargate_cluster,
-                scheduled_fargate_task_image_options=aws_ecs_patterns.ScheduledFargateTaskImageOptions(
-                    image=self.container_image,
-                    memory_limit_mib=self.memory,
-                    cpu=self.cpu,
-                    environment=self.environment_variables,
-                ),
-                schedule=self.schedule,
-                platform_version=aws_ecs.FargatePlatformVersion.LATEST,
+                desired_count=1,
+                task_definition=self.service_task_definition,
+                circuit_breaker=self.circuit_breaker,
+                propagate_tags=aws_ecs.PropagatedTagSource.SERVICE,
+                enable_ecs_managed_tags=True,
+                min_healthy_percent=self.min_healthy_percent,
+                max_healthy_percent=self.max_healthy_percent,
+                enable_execute_command=self.enable_execute_command,
+                security_groups=self.security_groups,
             )
         else:
             return aws_ecs_patterns.ApplicationLoadBalancedFargateService(

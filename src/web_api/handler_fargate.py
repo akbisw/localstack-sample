@@ -48,6 +48,12 @@ async def upload_kyb_proof_handler(
 def health() -> dict:
     return {"ok": True, "version": app.version}
 
+
+@router.get("/auth/health")
+def auth_health() -> dict:
+    return {"ok": True, "version": app.version}
+
+
 app.include_router(
     router=router,
     prefix="/onboarding/business/proof",

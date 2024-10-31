@@ -43,17 +43,6 @@ async def upload_kyb_proof_handler(
 
     return {"files": file_info}
 
-
-@router.get("/health")
-def health() -> dict:
-    return {"ok": True, "version": app.version}
-
-
-@router.get("/auth/health")
-def auth_health() -> dict:
-    return {"ok": True, "version": app.version}
-
-
 app.include_router(
     router=router,
     prefix="/onboarding/business/proof",
@@ -73,4 +62,8 @@ app.add_middleware(
 
 @app.get("/health")
 def health() -> dict:
+    return {"ok": True, "version": app.version}
+
+@app.get("/auth/health")
+def auth_health() -> dict:
     return {"ok": True, "version": app.version}

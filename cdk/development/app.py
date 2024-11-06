@@ -595,14 +595,14 @@ class LocalHttpApiStack(Stack):
                 ),
         )
 
-
         """ Cognito Authorizer """
         cognito_authorizer = aws_apigatewayv2_authorizers.HttpJwtAuthorizer(
             id="local-cognito-authorizer-v2",
             authorizer_name="local-cognito-authorizer-v2",
             jwt_audience=[user_pool_client.user_pool_client_id],
-            jwt_issuer=f"http://localhost.localstack.cloud:4566/{user_pool.user_pool_id}",
+            jwt_issuer=f"https://localhost.localstack.cloud:4566/{user_pool.user_pool_id}",
         )
+
         """ Add routes """
         # unauthenticated route for OPTIONS
         self.api_gateway.add_routes(
